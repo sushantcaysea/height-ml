@@ -1,0 +1,10 @@
+subject_id,height_cm,chest_cm,waist_cm,gender,race,profession,measurement_status,front_image_source_path,side_image_source_path,selfie_image_source_path
+0,159.0,79.0,68.0,female,latino,Employees,measured,files/0/front_img.jpg,files/0/side_img.jpg,files/0/selfie_img.jpg
+1,157.0,93.0,79.0,female,latino,Executives,measured,files/1/front_img.jpg,files/1/side_img.jpg,files/1/selfie_img.jpg
+10,163.0,112.0,88.0,male,caucasian,Others,tbr,files/10/front_img.jpg,files/10/side_img.jpg,files/10/selfie_img.jpg
+11,163.0,86.0,65.0,female,caucasian,Others,measured,files/11/front_img.jpg,files/11/side_img.jpg,files/11/selfie_img.jpg
+12,165.0,90.0,73.0,female,caucasian,Executives,measured,files/12/front_img.jpg,files/12/side_img.jpg,files/12/selfie_img.jpg
+13,155.0,105.0,102.0,male,caucasian,Others,tbr,files/13/front_img.jpg,files/13/side_img.jpg,files/13/selfie_img.jpg
+14,172.0,86.0,77.0,female,black,Employees,tbr,files/14/front_img.jpg,files/14/side_img.jpg,files/14/selfie_img.jpg
+15,168.0,103.0,101.0,male,indian,Intermediate_prof,tbr,files/15/front_img.jpg,files/15/side_img.jpg,files/15/selfie_img.jpg
+16,175.0,107.0,92.0,male,caucasian,Others,measured,files/16/front_img.jpg,files/16/side_img.jpg,files/16/selfie_img.jpg
