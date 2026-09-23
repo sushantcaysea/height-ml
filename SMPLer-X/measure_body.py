@@ -31,7 +31,67 @@ sys.path.insert(0, os.path.join(ROOT, "common", "utils"))
 import smplx  # library that builds a 3D body from shape numbers (betas)
 
 
-def circumference_at_height(vertices, y_level, band=0.02):
+def torso_only_ring(ring, x_limit=None):
+    """
+    Keep only torso points from a horizontal (x, z) slice.
+
+    T-pose arms stick out in X (often |x| > 0.3 m). A real chest half-width
+    is ~12–22 cm. We always clip |x| so the convex hull cannot wrap the arms.
+    """
+    if len(ring) < 8:
+        return ring
+
+    cx = float(np.median(ring[:, 0]))
+    if x_limit is None or not np.isfinite(x_limit) or x_limit <= 0:
+        x_limit = 0.17
+    x_limit = float(np.clip(x_limit, 0.12, 0.20))
+    torso = ring[np.abs(ring[:, 0] - cx) <= x_limit]
+    return torso if len(torso) >= 8 else ring
+
+
+def _ellipse_perimeter(ring):
+    """Smooth tape length: PCA ellipse around the torso slice (Ramanujan)."""
+    c = ring.mean(axis=0)
+    pts = ring - c
+    cov = np.cov(pts.T)
+    if cov.shape != (2, 2) or not np.isfinite(cov).all():
+        return None
+    evals, evecs = np.linalg.eigh(cov)
+    aligned = pts @ evecs
+    a = 0.5 * (aligned[:, 0].max() - aligned[:, 0].min())
+    b = 0.5 * (aligned[:, 1].max() - aligned[:, 1].min())
+    if a <= 1e-6 or b <= 1e-6:
+        return None
+    return float(np.pi * (3 * (a + b) - np.sqrt((3 * a + b) * (a + 3 * b))))
+
+
+def _hull_perimeter(ring):
+    if ConvexHull is None or len(ring) < 8:
+        return None
+    try:
+        hull = ConvexHull(ring)
+        pts = ring[hull.vertices]
+        pts = np.vstack([pts, pts[0]])
+        return float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
+    except Exception:
+        return None
+
+
+def ring_circumference(ring):
+    """
+    Tape around the slice. Convex hull of mesh vertices is slightly jagged
+    and tends to overestimate; a fitted ellipse is smoother. Use the smaller
+    of the two when both exist (closer to a real tape).
+    """
+    hull = _hull_perimeter(ring)
+    ell = _ellipse_perimeter(ring)
+    vals = [v for v in (hull, ell) if v is not None and np.isfinite(v) and v > 0]
+    if not vals:
+        return float("nan")
+    return float(min(vals))
+
+
+def circumference_at_height(vertices, y_level, band=0.012, x_limit=None):
     """
     Measure "tape around the body" at one height.
 
@@ -43,94 +103,89 @@ def circumference_at_height(vertices, y_level, band=0.02):
         The height (Y value) where we pretend to wrap the tape.
 
     band : float
-        We cannot cut infinitely thin. Keep points whose Y is close:
-            |y_i - y_level| < band
-        Default band = 0.02 m = 2 cm thick slice.
+        Keep points with |y - y_level| < band. Default 1.2 cm (thin slice).
+
+    x_limit : float or None
+        Max |x| from the body midline (meters). Drops arms.
 
     Returns circumference in meters.
     """
-
-    # --- Step A: take a thin horizontal slice of the body ---
-    # Boolean mask: True for points near the chosen height
-    # abs(y - y_level) < band  <=>  point is inside the slice
     mask = np.abs(vertices[:, 1] - y_level) < band
-    # Project those 3D points onto the ground plane (drop Y):
-    # keep only (x, z) so we get a 2D outline looking from above
-    ring = vertices[mask][:, [0, 2]]  # shape (M, 2)
+    ring = vertices[mask][:, [0, 2]]
 
-    # If too few points, widen the slice (2.5 * band)
     if len(ring) < 8:
         mask = np.abs(vertices[:, 1] - y_level) < band * 2.5
         ring = vertices[mask][:, [0, 2]]
     if len(ring) < 8:
-        return float("nan")  # not enough points to measure
+        return float("nan")
 
-    # --- Step B: outline length (best method = convex hull) ---
-    # Convex hull = smallest convex shape wrapping all ring points
-    # (like a rubber band around nails on a board).
-    # Walking around hull edges ≈ tape measure around the torso.
-    if ConvexHull is not None:
-        try:
-            hull = ConvexHull(ring)
-            # hull.vertices = indices of points on the outer outline, in order
-            pts = ring[hull.vertices]
-            # Close the loop: add first point again at the end
-            # so last segment connects back to start
-            pts = np.vstack([pts, pts[0]])
-
-            # Distance between consecutive points:
-            #   ||pts[i+1] - pts[i]||  = sqrt(dx^2 + dz^2)
-            # Sum = full perimeter
-            edge_lengths = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
-            return float(np.sum(edge_lengths))
-        except Exception:
-            pass
-
-    # --- Step C: fallback if hull fails ---
-    # Pretend the cross-section is an ellipse with:
-    #   width  = max(x) - min(x)   -> semi-axis a = width/2
-    #   depth  = max(z) - min(z)   -> semi-axis b = depth/2
-    # Ramanujan approximation for ellipse perimeter:
-    #   P ≈ π [ 3(a+b) - sqrt( (3a+b)(a+3b) ) ]
-    width = ring[:, 0].max() - ring[:, 0].min()
-    depth = ring[:, 1].max() - ring[:, 1].min()
-    a, b = width / 2.0, depth / 2.0
-    return float(np.pi * (3 * (a + b) - np.sqrt((3 * a + b) * (a + 3 * b))))
+    ring = torso_only_ring(ring, x_limit=x_limit)
+    return ring_circumference(ring)
 
 
-def measure_vertices(vertices):
+def _shoulder_half_width(joints):
+    """SMPL-X joints: 16 = left shoulder, 17 = right shoulder."""
+    if joints is None or len(joints) <= 17:
+        return None
+    half = min(abs(float(joints[16, 0])), abs(float(joints[17, 0])))
+    if not np.isfinite(half) or half < 0.05:
+        return None
+    return half
+
+
+def _slice_heights(vertices, joints, y_min, height_m):
+    """
+    Chest / waist Y from SMPL-X joints when possible.
+    0 pelvis, 3 spine1, 6 spine2, 9 spine3, 12 neck, 16/17 shoulders.
+    """
+    chest_y = y_min + 0.71 * height_m
+    waist_y = y_min + 0.545 * height_m
+    if joints is None or len(joints) <= 17:
+        return chest_y, waist_y
+    try:
+        pelvis = float(joints[0, 1])
+        spine1 = float(joints[3, 1])
+        spine3 = float(joints[9, 1])
+        neck = float(joints[12, 1]) if len(joints) > 12 else spine3
+        sh_y = 0.5 * (float(joints[16, 1]) + float(joints[17, 1]))
+        # Bust: below shoulders / around spine3, not up in the armpits
+        chest_y = 0.50 * spine3 + 0.30 * sh_y + 0.20 * neck
+        # Natural waist: between pelvis and spine1 (navel), not lower rib
+        waist_y = 0.42 * pelvis + 0.58 * spine1
+        chest_y = float(np.clip(chest_y, y_min + 0.62 * height_m, y_min + 0.78 * height_m))
+        waist_y = float(np.clip(waist_y, y_min + 0.50 * height_m, y_min + 0.62 * height_m))
+    except Exception:
+        pass
+    return chest_y, waist_y
+
+
+def measure_vertices(vertices, joints=None):
     """
     Compute the 3 assignment measurements from one mesh.
 
-    HEIGHT math:
-        height = max(y) - min(y)
-        (top of head minus bottom of feet, in meters)
-
-    CHEST / WAIST math:
-        Choose a height as a fraction of body height from the feet:
-            chest_y = y_min + 0.74 * height   # ~ chest / bust line
-            waist_y = y_min + 0.58 * height   # ~ waist / navel line
-        Then call circumference_at_height at those Y values.
-
-    Finally convert m -> cm by * 100.
+    HEIGHT: max(y) - min(y) on the T-pose mesh.
+    CHEST / WAIST: torso-only tape at joint-based heights.
     """
-    y_min = vertices[:, 1].min()  # feet (lowest)
-    y_max = vertices[:, 1].max()  # head (highest)
+    y_min = vertices[:, 1].min()
+    y_max = vertices[:, 1].max()
     height_m = float(y_max - y_min)
 
-    # Fractions 0.74 and 0.58 are approximate anatomy landmarks
-    # (not exact medical definitions — good enough for this mini-pipeline)
-    chest_m = circumference_at_height(vertices, y_min + 0.74 * height_m)
-    waist_m = circumference_at_height(vertices, y_min + 0.58 * height_m)
+    sh = _shoulder_half_width(joints)
+    x_chest = 0.80 * sh if sh else 0.16
+    x_waist = 0.64 * sh if sh else 0.14
+    chest_y, waist_y = _slice_heights(vertices, joints, y_min, height_m)
+
+    chest_m = circumference_at_height(vertices, chest_y, x_limit=x_chest)
+    waist_m = circumference_at_height(vertices, waist_y, x_limit=x_waist)
 
     return {
-        "height_cm": height_m * 100,  # 1 m = 100 cm
+        "height_cm": height_m * 100,
         "chest_cm": chest_m * 100,
         "waist_cm": waist_m * 100,
     }
 
 
-def build_tpose_vertices(betas, model):
+def build_tpose_vertices(betas, model, return_joints=False):
     """
     Build a standing T-pose body from shape only.
 
@@ -140,11 +195,13 @@ def build_tpose_vertices(betas, model):
         SMPL-X:  mesh ≈ mean_body + sum_i (betas[i] * shape_basis[i])
         (skinning/joints also applied inside smplx; we zero the pose.)
 
-    Why T-pose?
+        Why T-pose?
         Posed mesh (arms out, bent) makes waist slices wrong.
-        Zero pose = arms in neutral T → cleaner chest/waist rings.
+        Zero pose = arms in a known T. We then drop arm points and
+        measure only the torso ring.
 
     Returns vertices as NumPy array shape (10475, 3) for SMPL-X.
+    If return_joints is True, also returns joints (J, 3).
     """
     # Make betas a torch tensor of shape (1, 10)
     betas_t = torch.tensor(betas, dtype=torch.float32).view(1, -1)
@@ -168,8 +225,11 @@ def build_tpose_vertices(betas, model):
         expression=torch.zeros(1, 10),
         transl=torch.zeros(1, 3),
     )
-    # out.vertices: (1, N, 3) on GPU/CPU tensor -> NumPy (N, 3)
-    return out.vertices[0].detach().cpu().numpy()
+    verts = out.vertices[0].detach().cpu().numpy()
+    if return_joints:
+        joints = out.joints[0].detach().cpu().numpy()
+        return verts, joints
+    return verts
 
 
 def main():
@@ -208,8 +268,8 @@ def main():
         betas = data["betas"]
 
         # betas -> 3D points -> height/chest/waist
-        verts = build_tpose_vertices(betas, model)
-        m = measure_vertices(verts)
+        verts, joints = build_tpose_vertices(betas, model, return_joints=True)
+        m = measure_vertices(verts, joints)
 
         name = os.path.basename(path)
         print(f"{name:<16} {m['height_cm']:10.1f} {m['chest_cm']:10.1f} {m['waist_cm']:10.1f}")

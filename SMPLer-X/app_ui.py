@@ -149,8 +149,8 @@ def measure_from_results():
     model = get_smplx_model()
     data = np.load(npz_files[0])
     betas = data["betas"]
-    verts = build_tpose_vertices(betas, model)
-    return measure_vertices(verts), npz_files[0].name
+    verts, joints = build_tpose_vertices(betas, model, return_joints=True)
+    return measure_vertices(verts, joints), npz_files[0].name
 
 
 def find_overlay_image():
@@ -272,7 +272,7 @@ def format_results(m: dict, npz_name: str, truth: dict) -> str:
     lines += [
         "",
         "### Notes",
-        "- Height is usually strongest; chest can be oversized (arms in T-pose slice).",
+        "- Chest/waist use a torso-only slice (arms in T-pose are ignored).",
         "- Measurements use shape betas → digital T-pose → geometry (not a separate ML measurer).",
     ]
     return "\n".join(lines)
